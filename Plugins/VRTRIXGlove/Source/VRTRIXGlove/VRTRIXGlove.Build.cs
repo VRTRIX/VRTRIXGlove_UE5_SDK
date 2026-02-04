@@ -26,6 +26,7 @@ public class VRTRIXGlove : ModuleRules
                 "VRTRIXGloveLibrary",
 				"Projects",
                 "HeadMountedDisplay",
+				"InputCore",
                 "RHI",
                 "RenderCore",
                 "ProceduralMeshComponent",
@@ -53,15 +54,8 @@ public class VRTRIXGlove : ModuleRules
 			}
 			);
 
-        if (Target.Platform == UnrealTargetPlatform.Win64)
-		{
-		PublicDependencyModuleNames.AddRange(
-			new string[]
-			{
-            "SteamVR",
-            "OpenVR",
-			});
-		}
+		// UE5.3: SteamVR/OpenVR plugins are no longer supported.
+		// Keep XR support via the engine's generic XR layer (HeadMountedDisplay/OpenXR).
 
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {

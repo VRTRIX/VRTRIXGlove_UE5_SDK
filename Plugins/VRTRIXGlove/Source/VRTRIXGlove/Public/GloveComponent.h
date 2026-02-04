@@ -8,24 +8,14 @@
 #include "EngineUtils.h"
 #include "CoreMinimal.h"
 
-#define STEAMVR_SUPPORTED_PLATFORM (PLATFORM_LINUX || (PLATFORM_WINDOWS && WINVER > 0x0502))
-// #TODO: Check this over time for when they make it global
-// @TODO: hardcoded to match FSteamVRHMD::GetSystemName(), which we should turn into 
-static FName SteamVRSystemName(TEXT("SteamVR"));
-
-#if STEAMVR_SUPPORTED_PLATFORM
-#include "openvr.h"
-#include "ISteamVRPlugin.h"
-#include "SteamVRFunctionLibrary.h"
-
-#endif // STEAMVR_SUPPORTED_PLATFORM
-
 #include "ProceduralMeshComponent.h"
 #include "KismetProceduralMeshLibrary.h"
-#include "HeadMountedDisplayFunctionLibrary.h"
 #include "IHeadMountedDisplay.h"
+#include "HeadMountedDisplayTypes.h"
+#include "InputCoreTypes.h"
 #include "Components/PoseableMeshComponent.h"
 #include "Components/SceneComponent.h"
+#include "MotionControllerComponent.h"
 #include "GloveComponent.generated.h"
 
 DECLARE_LOG_CATEGORY_EXTERN(LogVRTRIXGlovePlugin, Log, All);
@@ -393,6 +383,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	void GetTrackerIndex();
 
+	// UE5.3+ (OpenXR / Generic XR): specify which Motion Controller "hand" to use as wrist tracker source.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR")
+	EControllerHand LeftWristTrackerSource = EControllerHand::Left;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR")
+	EControllerHand RightWristTrackerSource = EControllerHand::Right;
+
+	// Optional: references to actual MotionControllerComponents that represent the wrist trackers.
+	// 理论上，如果引擎支持在组件 Details 面板里直接选组件，下拉框会在这里出现。
+	// 但当前 UE5.3 的限制是：组件类上的 UPROPERTY 指向同一 Actor 的其他组件，Details 里只能显示 None。
+	// 因此，推荐的做法是在拥有者 Actor 的蓝图图表里，在 BeginPlay 中用节点把这两个指针手动赋值。
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR", meta = (DisplayName = "Left Wrist Controller"))
+	UMotionControllerComponent* LeftWristController = nullptr;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR", meta = (DisplayName = "Right Wrist Controller"))
+	UMotionControllerComponent* RightWristController = nullptr;
+
 	//Call this function to apply tracker offset on the wrist joint.
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	FTransform ApplyTrackerOffset();
@@ -559,8 +566,6 @@ private:
 	FQuat RWristTrackerPitchOffset;
 	bool bIsLOffsetCal = false;
 	bool bIsROffsetCal = false;
-	vr::IVRSystem * VRSystem;
-	vr::IVRCompositor* VRCompositor;
 	FVector m_LTrackerLoc;
 	FVector m_RTrackerLoc;
 	FRotator m_LTrackerRot;
