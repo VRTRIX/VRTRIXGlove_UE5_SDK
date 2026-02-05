@@ -16,37 +16,14 @@
 
 DEFINE_LOG_CATEGORY(LogVRTRIXGlovePlugin);
 
-static bool GetXRTrackerPose(UObject* WorldContextObject, EControllerHand SourceHand, FVector& OutLocation, FRotator& OutRotation)
+bool UGloveComponent::GetXRTrackerPose(FVector& OutLocation, FRotator& OutRotation)
 {
-	// New implementation: 直接从绑定到 GloveComponent 的 MotionControllerComponent 指针读取世界变换，
-	// 不再依赖 IMotionController / OpenVR / SteamVR。
-
-	const UGloveComponent* Glove = Cast<UGloveComponent>(WorldContextObject);
-	if (!Glove)
-	{
-		return false;
-	}
-
-	const UMotionControllerComponent* MC =
-		(SourceHand == EControllerHand::Left) ? Glove->LeftWristController :
-		(SourceHand == EControllerHand::Right) ? Glove->RightWristController :
-		nullptr;
+	const UMotionControllerComponent* MC = 
+		(HandType == Hand::Left) ? LeftWristController : RightWristController;
 
 	if (!MC)
 	{
-		// 退一步：如果按 SourceHand 找不到，就兜底用任意一个非空的 WristController，
-		// 避免因为左右手 Blueprint 绑定错一个属性而完全拿不到跟踪数据。
-		const UMotionControllerComponent* LeftPtr = Glove->LeftWristController;
-		const UMotionControllerComponent* RightPtr = Glove->RightWristController;
-
-		if (LeftPtr || RightPtr)
-		{
-			MC = LeftPtr ? LeftPtr : RightPtr;
-		}
-		else
-		{
-			return false;
-		}
+		return false;
 	}
 
 	const FTransform T = MC->GetComponentTransform();
@@ -243,7 +220,7 @@ void UGloveComponent::OnReceiveNewPose(VRTRIX::Pose pose)
 			if (pose.type == VRTRIX::Hand_Left  && i == (int)VRTRIX::Wrist_Joint) {
 				FRotator tracker_rot;
 				FVector tracker_loc;
-				if (GetXRTrackerPose(this, LeftWristTrackerSource, tracker_loc, tracker_rot)) {
+				if (GetXRTrackerPose(tracker_loc, tracker_rot)) {
 					if (!bIsLOffsetCal) {
 						LWristTrackerPitchOffset = FQuat(FVector::ForwardVector, FMath::DegreesToRadians(tracker_rot.Roll + 90.0f));
 						UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] Left Hand Glove connected to channel: %d"), pose.channel);
@@ -251,18 +228,12 @@ void UGloveComponent::OnReceiveNewPose(VRTRIX::Pose pose)
 					}
 					FQuat target = tracker_rot.Quaternion() * LWristTrackerPitchOffset * WristTrackerRotOffset.Quaternion();
 					initialPoseOffset = target * quat.Inverse();
-
-					// 调试日志：输出当前左手 tracker 的位姿
-					//UE_LOG(LogVRTRIXGlovePlugin, Display,
-					//	TEXT("[GLOVES PULGIN] Left tracker pose: Loc=(%.2f, %.2f, %.2f) Rot=(P%.1f Y%.1f R%.1f)"),
-					//	tracker_loc.X, tracker_loc.Y, tracker_loc.Z,
-					//	tracker_rot.Pitch, tracker_rot.Yaw, tracker_rot.Roll);
 				}
 			}
 			else if (pose.type == VRTRIX::Hand_Right  && i == (int)VRTRIX::Wrist_Joint) {
 				FRotator tracker_rot;
 				FVector tracker_loc;
-				if (GetXRTrackerPose(this, RightWristTrackerSource, tracker_loc, tracker_rot)) {
+				if (GetXRTrackerPose(tracker_loc, tracker_rot)) {
 					if (!bIsROffsetCal) {
 						RWristTrackerPitchOffset = FQuat(FVector::ForwardVector, FMath::DegreesToRadians(tracker_rot.Roll - 90.0f));
 						UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] Right Hand Glove connected to channel: %d"), pose.channel);
@@ -270,12 +241,6 @@ void UGloveComponent::OnReceiveNewPose(VRTRIX::Pose pose)
 					}
 					FQuat target = tracker_rot.Quaternion() * RWristTrackerPitchOffset * WristTrackerRotOffset.Quaternion();
 					initialPoseOffset = target * quat.Inverse();
-
-					// 调试日志：输出当前右手 tracker 的位姿
-					//UE_LOG(LogVRTRIXGlovePlugin, Display,
-					//	TEXT("[GLOVES PULGIN] Right tracker pose: Loc=(%.2f, %.2f, %.2f) Rot=(P%.1f Y%.1f R%.1f)"),
-					//	tracker_loc.X, tracker_loc.Y, tracker_loc.Z,
-					//	tracker_rot.Pitch, tracker_rot.Yaw, tracker_rot.Roll);
 				}
 			}
 		}
@@ -453,20 +418,9 @@ void UGloveComponent::ApplyHandMoCapWorldSpaceRotation(UPoseableMeshComponent *S
 
 void UGloveComponent::GetTrackerIndex()
 {
-	// UE5.3+: SteamVR/OpenVR device enumeration is removed.
-	// Validate the configured sources and log their current availability.
 	FVector Loc;
 	FRotator Rot;
-
-	const bool bLeftOk = GetXRTrackerPose(this, LeftWristTrackerSource, Loc, Rot);
-	//UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] LeftWristTrackerSource=%s valid=%s"),
-	//	*UEnum::GetValueAsString(LeftWristTrackerSource),
-	//	bLeftOk ? TEXT("true") : TEXT("false"));
-
-	const bool bRightOk = GetXRTrackerPose(this, RightWristTrackerSource, Loc, Rot);
-	//UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] RightWristTrackerSource=%s valid=%s"),
-	//	*UEnum::GetValueAsString(RightWristTrackerSource),
-	//	bRightOk ? TEXT("true") : TEXT("false"));
+	GetXRTrackerPose(Loc, Rot);
 }
 
 
@@ -475,20 +429,11 @@ FTransform UGloveComponent::ApplyTrackerOffset()
 	FRotator tracker_rot;
 	FVector tracker_loc;
 
-	switch (type) {
-	case(VRTRIX::Hand_Left): {
-		if (!GetXRTrackerPose(this, LeftWristTrackerSource, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
+	if (!GetXRTrackerPose(tracker_loc, tracker_rot))
+	{
+		return FTransform::Identity;
 	}
-	case(VRTRIX::Hand_Right): {
-		if (!GetXRTrackerPose(this, RightWristTrackerSource, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
-	}
-	}
+
 	FVector new_positon = tracker_loc + tracker_rot.Quaternion() * WristTrackerOffset;
 	return FTransform(tracker_rot, new_positon, FVector(1, 1, 1));
 }
@@ -497,20 +442,11 @@ FTransform UGloveComponent::GetTrackerTransform() {
 	FRotator tracker_rot;
 	FVector tracker_loc;
 
-	switch (type) {
-	case(VRTRIX::Hand_Left): {
-		if (!GetXRTrackerPose(this, LeftWristTrackerSource, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
+	if (!GetXRTrackerPose(tracker_loc, tracker_rot))
+	{
+		return FTransform::Identity;
 	}
-	case(VRTRIX::Hand_Right): {
-		if (!GetXRTrackerPose(this, RightWristTrackerSource, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
-	}
-	}
+
 	return FTransform(tracker_rot, tracker_loc, FVector(1, 1, 1));
 }
 

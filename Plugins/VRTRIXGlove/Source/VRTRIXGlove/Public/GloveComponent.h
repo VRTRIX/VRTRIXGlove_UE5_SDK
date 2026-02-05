@@ -383,21 +383,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	void GetTrackerIndex();
 
-	// UE5.3+ (OpenXR / Generic XR): specify which Motion Controller "hand" to use as wrist tracker source.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR")
-	EControllerHand LeftWristTrackerSource = EControllerHand::Left;
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR")
-	EControllerHand RightWristTrackerSource = EControllerHand::Right;
-
-	// Optional: references to actual MotionControllerComponents that represent the wrist trackers.
-	// 理论上，如果引擎支持在组件 Details 面板里直接选组件，下拉框会在这里出现。
-	// 但当前 UE5.3 的限制是：组件类上的 UPROPERTY 指向同一 Actor 的其他组件，Details 里只能显示 None。
-	// 因此，推荐的做法是在拥有者 Actor 的蓝图图表里，在 BeginPlay 中用节点把这两个指针手动赋值。
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR", meta = (DisplayName = "Left Wrist Controller"))
+	// References to MotionControllerComponents representing wrist trackers.
+	// Must be assigned in Blueprint's BeginPlay event (not visible in Details panel).
+	UPROPERTY(BlueprintReadWrite, Category = "Developer_Configurable|XR")
 	UMotionControllerComponent* LeftWristController = nullptr;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable|XR", meta = (DisplayName = "Right Wrist Controller"))
+	UPROPERTY(BlueprintReadWrite, Category = "Developer_Configurable|XR")
 	UMotionControllerComponent* RightWristController = nullptr;
 
 	//Call this function to apply tracker offset on the wrist joint.
@@ -581,11 +572,11 @@ private:
 	float m_FinalFingerSpacing = 0;
 
 private:
-	IMotionController* GetSteamMotionController();
 	void CreateBoneIndexToBoneNameMap(FHandBonesName names);
 	double CalculateBendAngle(const VRTRIX::VRTRIXQuaternion_t& q1, const VRTRIX::VRTRIXQuaternion_t& q2);
 	double GetFingerBendAngle(VRTRIX::Joint finger);
 	void PerformAlgorithmTuning();
+	bool GetXRTrackerPose(FVector& OutLocation, FRotator& OutRotation);
 };
 
 class CVRTRIXIMUEventHandler :public VRTRIX::IVRTRIXIMUEventHandler
