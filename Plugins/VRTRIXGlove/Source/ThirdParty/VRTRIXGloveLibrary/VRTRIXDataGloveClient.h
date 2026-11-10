@@ -130,6 +130,17 @@ namespace VRTRIX
 		* @returns void
 		*/
 		virtual void RegisterIMUDataCallback(IVRTRIXIMUEventHandler* &pEventHandler, void* pUserParam = NULL) = 0;
+
+		/** Get the glove hardware version the server reported for this hand during the current connection.
+		*	The value is the last valid model seen since the TCP connection was (re)established; frames that
+		*	report no model (0) do not clear it, and it is reset on every reconnect. Servers older than 2.x
+		*	never report a model, so this always returns false with them. It is already up to date when
+		*	OnReceivedNewPose is called for the frame that carried it.
+		*
+		* @param version: receives the reported hardware version; left untouched when false is returned.
+		* @returns true if the server has reported a known model during this connection, false otherwise.
+		*/
+		virtual bool GetServerReportedVersion(GLOVEVERSION& version) = 0;
 	};
 
 	/** Initialization of the data glove.
