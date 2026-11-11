@@ -7,23 +7,33 @@
 #include <Engine.h>
 #include "EngineUtils.h"
 #include "CoreMinimal.h"
+#include "Runtime/Launch/Resources/Version.h"
 
-#define STEAMVR_SUPPORTED_PLATFORM (PLATFORM_LINUX || (PLATFORM_WINDOWS && WINVER > 0x0502))
-// #TODO: Check this over time for when they make it global
-// @TODO: hardcoded to match FSteamVRHMD::GetSystemName(), which we should turn into 
-static FName SteamVRSystemName(TEXT("SteamVR"));
+// The engine's SteamVR plugin, and with it the SteamVR Blueprint functions of UGloveComponent,
+// exists only on UE 5.0-5.2. One plugin source serves every engine version from 5.0 on.
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION <= 2
+#define VRTRIX_UE_HAS_STEAMVR 1
+#else
+#define VRTRIX_UE_HAS_STEAMVR 0
+#endif
 
-#if STEAMVR_SUPPORTED_PLATFORM
+#if VRTRIX_UE_HAS_STEAMVR
 #include "openvr.h"
 #include "ISteamVRPlugin.h"
 #include "SteamVRFunctionLibrary.h"
-
-#endif // STEAMVR_SUPPORTED_PLATFORM
+#include "HeadMountedDisplayFunctionLibrary.h"
+#include "IHeadMountedDisplay.h"
+#else
+// No OpenVR headers on UE 5.3+; the OpenVR pointers kept in UGloveComponent only need the names.
+namespace vr
+{
+	class IVRSystem;
+	class IVRCompositor;
+}
+#endif
 
 #include "ProceduralMeshComponent.h"
 #include "KismetProceduralMeshLibrary.h"
-#include "HeadMountedDisplayFunctionLibrary.h"
-#include "IHeadMountedDisplay.h"
 #include "Components/PoseableMeshComponent.h"
 #include "Components/SceneComponent.h"
 #include "GloveComponent.generated.h"
@@ -343,11 +353,8 @@ public:
 	// Disconnect data gloves
 	void OnDisconnectGloves();
 
-	// Initialize tracking system
+	// Initialize tracking system (SteamVR, UE 5.0-5.2 only; returns false on UE 5.3+)
 	bool GetTrackingSystem();
-
-	// Get the EControllerHand enum;
-	EControllerHand MapHandtoEControllerHand();
 
 	//Gesture detecting,update gesture state,generate gesture event
 	void Calculate_Gesture_Event();
@@ -389,15 +396,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	void OrientationAlignment();
 
-	//Call this function to get tracker device index and identifying lefthand tracker & righthand tracker
+	//Call this function to get tracker device index and identifying lefthand tracker & righthand tracker. Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ it does nothing and logs a warning on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	void GetTrackerIndex();
 
-	//Call this function to apply tracker offset on the wrist joint.
+	//Call this function to apply tracker offset on the wrist joint. Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ it returns the identity transform and logs a warning on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	FTransform ApplyTrackerOffset();
 
-	//Call this function to get corresponded tracker transform on the wrist joint.
+	//Call this function to get corresponded tracker transform on the wrist joint. Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ it returns the identity transform and logs a warning on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	FTransform GetTrackerTransform();
 
@@ -405,25 +412,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "VRTRIX_GLOVES")
 	void SetWristAlignment(FRotator alignment);
 	
-	// Gets a String device property
+	// Gets a String device property. Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ Result is OnFailed and a warning is logged on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRExpansionFunctions|SteamVR", meta = (bIgnoreSelf = "true", DisplayName = "GetVRDevicePropertyString", ExpandEnumAsExecs = "Result"))
 	void GetVRDevicePropertyString(EVRDeviceProperty_String PropertyToRetrieve, int32 DeviceID, FString & StringValue, EBPOVRResultSwitch & Result);
 
-	// Gets a Bool device property
+	// Gets a Bool device property. Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ Result is OnFailed and a warning is logged on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRExpansionFunctions|SteamVR", meta = (bIgnoreSelf = "true", DisplayName = "GetVRDevicePropertyBool", ExpandEnumAsExecs = "Result"))
 	void GetVRDevicePropertyBool(EVRDeviceProperty_Bool PropertyToRetrieve, int32 DeviceID, bool & BoolValue, EBPOVRResultSwitch & Result);
 
-	// Gets a Float device property
+	// Gets a Float device property. Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ Result is OnFailed and a warning is logged on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRExpansionFunctions|SteamVR", meta = (bIgnoreSelf = "true", DisplayName = "GetVRDevicePropertyFloat", ExpandEnumAsExecs = "Result"))
 	void GetVRDevicePropertyFloat(EVRDeviceProperty_Float PropertyToRetrieve, int32 DeviceID, float & FloatValue, EBPOVRResultSwitch & Result);
 
-	// Gets a Int32 device property
+	// Gets a Int32 device property. Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ Result is OnFailed and a warning is logged on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRExpansionFunctions|SteamVR", meta = (bIgnoreSelf = "true", DisplayName = "GetVRDevicePropertyInt32", ExpandEnumAsExecs = "Result"))
 	void GetVRDevicePropertyInt32(EVRDeviceProperty_Int32 PropertyToRetrieve, int32 DeviceID, int32 & IntValue, EBPOVRResultSwitch & Result);
 
-	// Gets a UInt64 device property as a string (Blueprints do not support int64)
+	// Gets a UInt64 device property as a string (Blueprints do not support int64). Only available on UE 5.0-5.2 (SteamVR); on UE 5.3+ Result is OnFailed and a warning is logged on the first call.
 	UFUNCTION(BlueprintCallable, Category = "VRExpansionFunctions|SteamVR", meta = (bIgnoreSelf = "true", DisplayName = "GetVRDevicePropertyUInt64", ExpandEnumAsExecs = "Result"))
 	void GetVRDevicePropertyUInt64(EVRDeviceProperty_UInt64 PropertyToRetrieve, int32 DeviceID, FString & UInt64Value, EBPOVRResultSwitch & Result);
+	
 
 	//Gesture Trigger Event. Hand Position Cross Into the Defined Bounds of this Gesture 
 	UPROPERTY(BlueprintAssignable, Category = "Gesture_Event")
@@ -469,12 +477,28 @@ public:
 	
 
 
+	// These two are declared before the HardwareVersion property: after it, the name HardwareVersion
+	// inside this class means that property, not the enum type.
+
+	//Glove model in effect: the model the server reports when Auto Detect Hardware Version is on and the server reports one (2.x servers), otherwise HardwareVersion.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, Category = "Glove_Data")
+		HardwareVersion EffectiveHardwareVersion = HardwareVersion::PRO11;
+	//True when Effective Hardware Version came from the server, false when it is the manually selected HardwareVersion.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Transient, Category = "Glove_Data")
+		bool bHardwareVersionFromServer = false;
+
 	//Which hand you want to bond with your model,make sure the receiver for selected hand is connected
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable")
 		Hand HandType = Hand::Left;
-	//Which hand you want to bond with your model,make sure the receiver for selected hand is connected
+	//Glove model selected by hand. Used when Auto Detect Hardware Version is off or the server does not report a model (servers older than 2.x).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable")
-		HardwareVersion HardwareVersion = HardwareVersion::PRO;
+		HardwareVersion HardwareVersion = HardwareVersion::PRO11;
+	//Use the glove model the server reports (2.x servers) instead of HardwareVersion.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable")
+		bool bAutoDetectHardwareVersion = true;
+	//Replace FingerSpacing, FinalFingerSpacing and ThumbOffset values that still hold a factory default with the defaults of the glove model in effect. Values you changed yourself are kept.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable")
+		bool bUseModelDefaults = true;
 	//Server ip address to fetch glove data
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable")
 		FString ServerIP = "127.0.0.1";
@@ -511,7 +535,7 @@ public:
 		float ThumbMiddleSlerp = 0.7;
 	//The model finger spacing when advanced mode is NOT enabled.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable")
-		float FingerSpacing = 5;
+		float FingerSpacing = 2;
 	//The model final finger spacing when four fingers are fully bended.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Developer_Configurable")
 		float FinalFingerSpacing = 2;
@@ -559,8 +583,9 @@ private:
 	FQuat RWristTrackerPitchOffset;
 	bool bIsLOffsetCal = false;
 	bool bIsROffsetCal = false;
-	vr::IVRSystem * VRSystem;
-	vr::IVRCompositor* VRCompositor;
+	// OpenVR interfaces, set by GetTrackingSystem on UE 5.0-5.2; always null on UE 5.3+.
+	vr::IVRSystem* VRSystem = nullptr;
+	vr::IVRCompositor* VRCompositor = nullptr;
 	FVector m_LTrackerLoc;
 	FVector m_RTrackerLoc;
 	FRotator m_LTrackerRot;
@@ -575,12 +600,24 @@ private:
 	float m_FingerSpacing = 0;
 	float m_FinalFingerSpacing = 0;
 
+	// Model applied by UpdateEffectiveHardwareVersion for the current connection. Like the m_* values
+	// above, used only on the client DLL's pose callback thread (reset in OnConnectGloves before connecting).
+	bool bEffectiveVersionApplied = false;
+	VRTRIX::GLOVEVERSION m_AppliedVersion = VRTRIX::PRO11;
+	bool m_bAppliedFromServer = false;
+	// Set when the model in effect changes; PerformAlgorithmTuning then pushes every value once.
+	bool bForceTuningPush = false;
+
 private:
-	IMotionController* GetSteamMotionController();
 	void CreateBoneIndexToBoneNameMap(FHandBonesName names);
 	double CalculateBendAngle(const VRTRIX::VRTRIXQuaternion_t& q1, const VRTRIX::VRTRIXQuaternion_t& q2);
 	double GetFingerBendAngle(VRTRIX::Joint finger);
 	void PerformAlgorithmTuning();
+	// Works out the model in effect; on the first pose and whenever it changes: logs it, switches the
+	// server algorithm to it and (bUseModelDefaults) resolves the tuning fields for it.
+	void UpdateEffectiveHardwareVersion();
+	// Replaces factory-default FingerSpacing / FinalFingerSpacing / ThumbOffset values with the preset of ModelVersion.
+	void ApplyModelDefaults(VRTRIX::GLOVEVERSION ModelVersion, bool bRightHand);
 };
 
 class CVRTRIXIMUEventHandler :public VRTRIX::IVRTRIXIMUEventHandler
