@@ -53,6 +53,18 @@ public class VRTRIXGlove : ModuleRules
 			}
 			);
 
+        // The engine's SteamVR plugin exists only on UE 5.0-5.2; GloveComponent uses it there
+        // (VRTRIX_UE_HAS_STEAMVR). Do not use Target.Architecture: it stopped being a string in 5.2.
+        if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion <= 2 && Target.Platform == UnrealTargetPlatform.Win64)
+        {
+            PublicDependencyModuleNames.AddRange(
+                new string[]
+                {
+                    "SteamVR",
+                    "OpenVR",
+                });
+        }
+
         if (Target.Platform == UnrealTargetPlatform.Win64)
         {
            RuntimeDependencies.Add("$(PluginDir)/Source/ThirdParty/VRTRIXGloveLibrary/x64/Release/VRTRIXDATAGLOVECLIENT.dll");
