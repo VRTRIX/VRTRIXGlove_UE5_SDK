@@ -25,5 +25,12 @@
       "Type": "DeveloperTool",
       "LoadingPhase": "PostConfigInit"
     }
+  ],
+  "Plugins": [
+    {
+      "Name": "SteamVR",
+      "Enabled": true,
+      "Optional": true
+    }
   ]
 }
