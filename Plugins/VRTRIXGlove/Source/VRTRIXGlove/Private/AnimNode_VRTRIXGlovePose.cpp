@@ -3,6 +3,7 @@
 
 #include "AnimNode_VRTRIXGlovePose.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 FAnimNode_VRTRIXGlovePose::FAnimNode_VRTRIXGlovePose()
 {
@@ -11,6 +12,13 @@ FAnimNode_VRTRIXGlovePose::FAnimNode_VRTRIXGlovePose()
 void FAnimNode_VRTRIXGlovePose::Initialize_AnyThread(const FAnimationInitializeContext & Context)
 {
 	FAnimNode_Base::Initialize_AnyThread(Context);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 2
+	if (!Context.AnimInstanceProxy || Context.AnimInstanceProxy->GetMainInstanceProxy() == nullptr)
+	{
+		//wait until we have a proper anim instance
+		return;
+	}
+#endif
 	UAnimInstance* anim = Context.AnimInstanceProxy->GetSkelMeshComponent()->GetAnimInstance();
 	if (anim == nullptr || anim->GetOwningActor() == nullptr) {
 		//UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] AnimInstance is NULL."));
