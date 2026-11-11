@@ -4,8 +4,14 @@
 
 #include "Engine/Texture2D.h"
 #include "Engine/Engine.h"
+#if VRTRIX_UE_HAS_STEAMVR
 #include "IXRTrackingSystem.h"
 #include "IHeadMountedDisplay.h"
+#endif
+
+// Rules shared with the C++ and Unity SDKs (byte-for-byte copy of the C++ SDK's header). Needs
+// VRTRIX::GLOVEVERSION, which GloveComponent.h brings in through the client headers.
+#include "VRTRIXModelDefaults.h"
 
 #if WITH_EDITOR
 #include "Editor/UnrealEd/Classes/Editor/EditorEngine.h"
@@ -13,15 +19,6 @@
 
 DEFINE_LOG_CATEGORY(LogVRTRIXGlovePlugin);
 
-static FORCEINLINE FMatrix ToFMatrix(const vr::HmdMatrix34_t& tm)
-{
-	// Rows and columns are swapped between vr::HmdMatrix34_t and FMatrix
-	return FMatrix(
-		FPlane(tm.m[0][0], tm.m[1][0], tm.m[2][0], 0.0f),
-		FPlane(tm.m[0][1], tm.m[1][1], tm.m[2][1], 0.0f),
-		FPlane(tm.m[0][2], tm.m[1][2], tm.m[2][2], 0.0f),
-		FPlane(tm.m[0][3], tm.m[1][3], tm.m[2][3], 1.0f));
-}
 
 void UGloveComponent::CreateBoneIndexToBoneNameMap(FHandBonesName names)
 {
@@ -81,48 +78,129 @@ double UGloveComponent::GetFingerBendAngle(VRTRIX::Joint finger)
 	return CalculateBendAngle(m_pose.imuData[VRTRIX::Wrist_Joint], m_pose.imuData[finger]);
 }
 
+// Version passed to InitDataGlove. DK1 gloves have always been initialized as DK2. PRO7 and PRO12
+// start as PRO11; the model in effect is switched to on the first pose (UpdateEffectiveHardwareVersion).
+static VRTRIX::GLOVEVERSION VRTRIXInitVersion(HardwareVersion Version)
+{
+	switch (Version) {
+	case HardwareVersion::DK1:
+	case HardwareVersion::DK2:
+		return VRTRIX::DK2;
+	case HardwareVersion::PRO:
+		return VRTRIX::PRO;
+	default:
+		return VRTRIX::PRO11;
+	}
+}
+
+// Version sent with SwitchHardwareVersion: the model in effect, except DK1, which keeps the DK2
+// algorithm it has always been initialized with.
+static VRTRIX::GLOVEVERSION VRTRIXServerAlgorithmVersion(VRTRIX::GLOVEVERSION Version)
+{
+	return (Version == VRTRIX::DK1) ? VRTRIX::DK2 : Version;
+}
+
+void UGloveComponent::UpdateEffectiveHardwareVersion()
+{
+	VRTRIX::GLOVEVERSION reportedVersion = VRTRIX::PRO11;
+	const bool bReported = pDataGlove->GetServerReportedVersion(reportedVersion);
+	const VRTRIX::GLOVEVERSION manualVersion = static_cast<VRTRIX::GLOVEVERSION>(HardwareVersion);
+	const VRTRIX::GLOVEVERSION effectiveVersion = VRTRIX::ModelDefaults::EffectiveVersion(
+		bAutoDetectHardwareVersion, bReported, reportedVersion, manualVersion);
+	const bool bFromServer = bAutoDetectHardwareVersion && bReported;
+	if (bEffectiveVersionApplied && effectiveVersion == m_AppliedVersion && bFromServer == m_bAppliedFromServer) {
+		return;
+	}
+	bEffectiveVersionApplied = true;
+	m_AppliedVersion = effectiveVersion;
+	m_bAppliedFromServer = bFromServer;
+	EffectiveHardwareVersion = static_cast<::HardwareVersion>(effectiveVersion);
+	bHardwareVersionFromServer = bFromServer;
+
+	const bool bRightHand = (type == VRTRIX::Hand_Right);
+	UE_LOG(LogTemp, Log, TEXT("[VRTRIX] %s hand: hardware version %s (%s)"),
+		bRightHand ? TEXT("Right") : TEXT("Left"),
+		*FString(VRTRIX::ModelDefaults::VersionName(effectiveVersion)),
+		bFromServer ? TEXT("server") : TEXT("manual"));
+
+	VRTRIX::EIMUError eIMUError = VRTRIX::IMUError_None;
+	pDataGlove->SwitchHardwareVersion(eIMUError, VRTRIXServerAlgorithmVersion(effectiveVersion));
+	if (bUseModelDefaults) {
+		ApplyModelDefaults(effectiveVersion, bRightHand);
+	}
+	// Push every tuning value once for this model, also the ones equal to what was pushed before,
+	// so the server never keeps a value from an earlier model or session.
+	bForceTuningPush = true;
+}
+
+void UGloveComponent::ApplyModelDefaults(VRTRIX::GLOVEVERSION ModelVersion, bool bRightHand)
+{
+	namespace ModelDefaults = VRTRIX::ModelDefaults;
+	const int32 thumbJointCount = ModelDefaults::kThumbJointCount;
+	if (ThumbOffset.Num() < thumbJointCount) {
+		UE_LOG(LogVRTRIXGlovePlugin, Warning, TEXT("[GLOVES PULGIN] ThumbOffset needs %d entries, model defaults not applied."), thumbJointCount);
+		return;
+	}
+	ModelDefaults::Tuning current = {};
+	current.fingerSpacing = FingerSpacing;
+	current.finalFingerSpacing = FinalFingerSpacing;
+	for (int32 joint = 0; joint < thumbJointCount; ++joint) {
+		current.thumbOffset[joint] = { ThumbOffset[joint].X, ThumbOffset[joint].Y, ThumbOffset[joint].Z };
+	}
+	const ModelDefaults::Tuning resolved = ModelDefaults::Resolve(current, ModelVersion, bRightHand, true);
+	FingerSpacing = static_cast<float>(resolved.fingerSpacing);
+	FinalFingerSpacing = static_cast<float>(resolved.finalFingerSpacing);
+	for (int32 joint = 0; joint < thumbJointCount; ++joint) {
+		const ModelDefaults::Vec3& resolvedOffset = resolved.thumbOffset[joint];
+		ThumbOffset[joint] = FVector(resolvedOffset.x, resolvedOffset.y, resolvedOffset.z);
+	}
+}
+
 void UGloveComponent::PerformAlgorithmTuning()
 {
+	UpdateEffectiveHardwareVersion();
+
 	VRTRIX::EIMUError error = VRTRIX::IMUError_None;
 	VRTRIX::VRTRIXVector_t offset;
 
-	if (m_ThumbOffset[0] != ThumbOffset[0]) {
+	if (bForceTuningPush || m_ThumbOffset[0] != ThumbOffset[0]) {
 		offset = { (float)ThumbOffset[0].X, (float)ThumbOffset[0].Y, (float)ThumbOffset[0].Z };
 		pDataGlove->AlgorithmTuning(error, VRTRIX::Thumb_Proximal, VRTRIX::AlgorithmConfig_ThumbOffset, 0, offset);
 		m_ThumbOffset[0] = ThumbOffset[0];
 	}
 
-	if (m_ThumbOffset[1] != ThumbOffset[1]) {
+	if (bForceTuningPush || m_ThumbOffset[1] != ThumbOffset[1]) {
 		offset = { (float)ThumbOffset[1].X, (float)ThumbOffset[1].Y, (float)ThumbOffset[1].Z };
 		pDataGlove->AlgorithmTuning(error, VRTRIX::Thumb_Intermediate, VRTRIX::AlgorithmConfig_ThumbOffset, 0, offset);
 		m_ThumbOffset[1] = ThumbOffset[1];
 	}
 
-	if (m_ThumbOffset[2] != ThumbOffset[2]) {
+	if (bForceTuningPush || m_ThumbOffset[2] != ThumbOffset[2]) {
 		offset = { (float)ThumbOffset[2].X, (float)ThumbOffset[2].Y, (float)ThumbOffset[2].Z };
 		pDataGlove->AlgorithmTuning(error, VRTRIX::Thumb_Distal, VRTRIX::AlgorithmConfig_ThumbOffset, 0, offset);
 		m_ThumbOffset[2] = ThumbOffset[2];
 	}
 
-	if (m_ThumbProximalSlerp != ThumbProximalSlerp) {
+	if (bForceTuningPush || m_ThumbProximalSlerp != ThumbProximalSlerp) {
 		pDataGlove->AlgorithmTuning(error, VRTRIX::Thumb_Proximal, VRTRIX::AlgorithmConfig_ProximalSlerpDown, ThumbProximalSlerp);
 		m_ThumbProximalSlerp = ThumbProximalSlerp;
 	}
 
-	if (m_ThumbMiddleSlerp != ThumbMiddleSlerp) {
+	if (bForceTuningPush || m_ThumbMiddleSlerp != ThumbMiddleSlerp) {
 		pDataGlove->AlgorithmTuning(error, VRTRIX::Thumb_Distal, VRTRIX::AlgorithmConfig_DistalSlerpDown, ThumbMiddleSlerp);
 		m_ThumbMiddleSlerp = ThumbMiddleSlerp;
 	}
 
-	if (m_FingerSpacing != FingerSpacing) {
+	if (bForceTuningPush || m_FingerSpacing != FingerSpacing) {
 		pDataGlove->AlgorithmTuning(error, VRTRIX::Wrist_Joint, VRTRIX::AlgorithmConfig_FingerSpacing, FingerSpacing);
 		m_FingerSpacing = FingerSpacing;
 	}
 
-	if (m_FinalFingerSpacing != FinalFingerSpacing) {
+	if (bForceTuningPush || m_FinalFingerSpacing != FinalFingerSpacing) {
 		pDataGlove->AlgorithmTuning(error, VRTRIX::Wrist_Joint, VRTRIX::AlgorithmConfig_FinalFingerSpacing, FinalFingerSpacing);
 		m_FinalFingerSpacing = FinalFingerSpacing;
 	}
+	bForceTuningPush = false;
 }
 
 // Sets default values for this component's properties
@@ -134,6 +212,11 @@ UGloveComponent::UGloveComponent()
 	rotation.Init(FRotator(0, 0, 0), VRTRIX::Joint_MAX);
 	FingerBendingAngle.Init(0.0, 5);
 	alignmentPose = FQuat::Identity;
+#if VRTRIX_UE_HAS_STEAMVR
+	// UE 5.0-5.2 plugins defaulted to PRO, and their demo assets were saved against those defaults (R3).
+	HardwareVersion = ::HardwareVersion::PRO;
+	FingerSpacing = 5;
+#endif
 	// ...
 }
 
@@ -164,9 +247,11 @@ void UGloveComponent::BeginPlay()
 	//创建骨骼映射；
 	CreateBoneIndexToBoneNameMap(handBoneNames);
 	// ...
+#if VRTRIX_UE_HAS_STEAMVR
 	if (bIsVREnabled && GetTrackingSystem()) {
 		GetTrackerIndex();
 	}
+#endif
 	OnConnectGloves();
 }
 
@@ -207,6 +292,7 @@ void UGloveComponent::OnReceiveNewPose(VRTRIX::Pose pose)
 				initialPoseOffset = alignmentPose * quat.Inverse();
 			}
 		}
+#if VRTRIX_UE_HAS_STEAMVR
 		else {
 			if (pose.type == VRTRIX::Hand_Left  && i == (int)VRTRIX::Wrist_Joint) {
 				FRotator tracker_rot;
@@ -235,6 +321,7 @@ void UGloveComponent::OnReceiveNewPose(VRTRIX::Pose pose)
 				}
 			}
 		}
+#endif
 
 		rotation[i] = (i == (int)VRTRIX::Wrist_Joint) ?
 			(initialPoseOffset * quat).Rotator() :
@@ -253,23 +340,10 @@ void UGloveComponent::OnConnectGloves()
 	VRTRIX::EIMUError eIMUError = VRTRIX::IMUError_None;
 	//Initialize event handler.
 	VRTRIX::IVRTRIXIMUEventHandler* pEventHandler = new CVRTRIXIMUEventHandler();
-	//Initialize data glove.
-	if (HardwareVersion == HardwareVersion::DK1 || HardwareVersion == HardwareVersion::DK2) {
-		pDataGlove = AdvancedMode ? InitDataGlove(eInitError, VRTRIX::InitMode_Advanced, VRTRIX::DK2) :
-			InitDataGlove(eInitError, VRTRIX::InitMode_Normal, VRTRIX::DK2);
-	}
-	else if (HardwareVersion == HardwareVersion::PRO) {
-		pDataGlove = AdvancedMode ? InitDataGlove(eInitError, VRTRIX::InitMode_Advanced, VRTRIX::PRO) :
-			InitDataGlove(eInitError, VRTRIX::InitMode_Normal, VRTRIX::PRO);
-	}
-	else if (HardwareVersion == HardwareVersion::PRO11) {
-		pDataGlove = AdvancedMode ? InitDataGlove(eInitError, VRTRIX::InitMode_Advanced, VRTRIX::PRO11) :
-			InitDataGlove(eInitError, VRTRIX::InitMode_Normal, VRTRIX::PRO11);
-	}
-	else {
-		UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] Invalid data glove hardware version!"));
-		return;
-	}
+	//Initialize data glove with the manually selected model; the model in effect is applied on the
+	//first pose (PerformAlgorithmTuning -> UpdateEffectiveHardwareVersion).
+	pDataGlove = InitDataGlove(eInitError, AdvancedMode ? VRTRIX::InitMode_Advanced : VRTRIX::InitMode_Normal,
+		VRTRIXInitVersion(HardwareVersion));
 
 	if (eInitError != VRTRIX::InitError_None) {
 		UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] Unable to init Glove runtime"));
@@ -281,6 +355,12 @@ void UGloveComponent::OnConnectGloves()
 	else if (HandType == Hand::Left) {
 		type = VRTRIX::Hand_Left;
 	}
+
+	//Until the first pose the model in effect is the manually selected one; the first pose applies
+	//(and logs) the model in effect again for this connection.
+	bEffectiveVersionApplied = false;
+	EffectiveHardwareVersion = HardwareVersion;
+	bHardwareVersionFromServer = false;
 
 	//Register event call back and perform events handling/pose updating.
 	pDataGlove->RegisterIMUDataCallback(pEventHandler, this);
@@ -316,21 +396,6 @@ void UGloveComponent::OnDisconnectGloves()
 		pDataGlove->DisconnectDataGlove(eIMUError);
 		bIsDataGlovePortOpened = false;
 	}
-}
-
-bool UGloveComponent::GetTrackingSystem()
-{
-	if (!GEngine->XRSystem.IsValid() || (GEngine->XRSystem->GetSystemName() != SteamVRSystemName))
-	{
-		UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] Unable to get tracking system."));
-		return false;
-	}
-
-	vr::HmdError HmdErr;
-	VRSystem = (vr::IVRSystem*)vr::VR_GetGenericInterface(vr::IVRSystem_Version, &HmdErr);
-	VRCompositor = (vr::IVRCompositor*)vr::VR_GetGenericInterface(vr::IVRCompositor_Version, &HmdErr);
-	if (VRSystem == NULL) UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] Unable to get tracking system."));
-	return (VRSystem != NULL);
 }
 
 void UGloveComponent::OnReconnect()
@@ -407,74 +472,6 @@ void UGloveComponent::ApplyHandMoCapWorldSpaceRotation(UPoseableMeshComponent *S
 	{
 		SkinMesh->SetBoneRotationByName(BoneIndexToBoneNameMap[i], FingerWorldSpaceRotation[i], EBoneSpaces::WorldSpace);
 	}
-}
-
-void UGloveComponent::GetTrackerIndex()
-{
-	if (!VRSystem) {
-		return;
-	}
-	for (int nDevice = 0; nDevice < vr::k_unMaxTrackedDeviceCount; ++nDevice)
-	{
-		//if (VRSystem->GetTrackedDeviceClass(nDevice) == vr::TrackedDeviceClass_GenericTracker) {
-		if (VRSystem->IsTrackedDeviceConnected(nDevice)) {
-			FString renderModel;
-			EBPOVRResultSwitch result;
-			GetVRDevicePropertyString(EVRDeviceProperty_String::Prop_RenderModelName_String_1003, nDevice, renderModel, result);
-			//UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] renderModel: %s"), *renderModel);
-			if (result == EBPOVRResultSwitch::OnSucceeded) {
-				if (renderModel == "LH") m_LHTrackerIndex = nDevice;
-				if (renderModel == "RH") m_RHTrackerIndex = nDevice;
-			}
-		}
-		//}
-	}
-	UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] LHIndex: %d"), m_LHTrackerIndex);
-	UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] RHIndex: %d"), m_RHTrackerIndex);
-}
-
-FTransform UGloveComponent::ApplyTrackerOffset()
-{
-	FRotator tracker_rot;
-	FVector tracker_loc;
-
-	switch (type) {
-	case(VRTRIX::Hand_Left): {
-		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_LHTrackerIndex, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
-	}
-	case(VRTRIX::Hand_Right): {
-		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_RHTrackerIndex, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
-	}
-	}
-	FVector new_positon = tracker_loc + tracker_rot.Quaternion() * WristTrackerOffset;
-	return FTransform(tracker_rot, new_positon, FVector(1, 1, 1));
-}
-
-FTransform UGloveComponent::GetTrackerTransform() {
-	FRotator tracker_rot;
-	FVector tracker_loc;
-
-	switch (type) {
-	case(VRTRIX::Hand_Left): {
-		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_LHTrackerIndex, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
-	}
-	case(VRTRIX::Hand_Right): {
-		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_RHTrackerIndex, tracker_loc, tracker_rot)) {
-			return FTransform::Identity;
-		}
-		break;
-	}
-	}
-	return FTransform(tracker_rot, tracker_loc, FVector(1, 1, 1));
 }
 
 void UGloveComponent::SetWristAlignment(FRotator alignment)
@@ -645,6 +642,96 @@ void UGloveComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActor
 	UGloveComponent::Calculate_Gesture_State();
 }
 
+#if VRTRIX_UE_HAS_STEAMVR
+// SteamVR tracker and device-property functions, UE 5.0-5.2 (code from the UE5.0_PRO plugin).
+
+// #TODO: Check this over time for when they make it global
+// @TODO: hardcoded to match FSteamVRHMD::GetSystemName(), which we should turn into
+static FName SteamVRSystemName(TEXT("SteamVR"));
+
+bool UGloveComponent::GetTrackingSystem()
+{
+	if (!GEngine->XRSystem.IsValid() || (GEngine->XRSystem->GetSystemName() != SteamVRSystemName))
+	{
+		UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] Unable to get tracking system."));
+		return false;
+	}
+
+	vr::HmdError HmdErr;
+	VRSystem = (vr::IVRSystem*)vr::VR_GetGenericInterface(vr::IVRSystem_Version, &HmdErr);
+	VRCompositor = (vr::IVRCompositor*)vr::VR_GetGenericInterface(vr::IVRCompositor_Version, &HmdErr);
+	if (VRSystem == NULL) UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] Unable to get tracking system."));
+	return (VRSystem != NULL);
+}
+
+void UGloveComponent::GetTrackerIndex()
+{
+	if (!VRSystem) {
+		return;
+	}
+	for (int nDevice = 0; nDevice < vr::k_unMaxTrackedDeviceCount; ++nDevice)
+	{
+		//if (VRSystem->GetTrackedDeviceClass(nDevice) == vr::TrackedDeviceClass_GenericTracker) {
+		if (VRSystem->IsTrackedDeviceConnected(nDevice)) {
+			FString renderModel;
+			EBPOVRResultSwitch result;
+			GetVRDevicePropertyString(EVRDeviceProperty_String::Prop_RenderModelName_String_1003, nDevice, renderModel, result);
+			//UE_LOG(LogVRTRIXGlovePlugin, Error, TEXT("[GLOVES PULGIN] renderModel: %s"), *renderModel);
+			if (result == EBPOVRResultSwitch::OnSucceeded) {
+				if (renderModel == "LH") m_LHTrackerIndex = nDevice;
+				if (renderModel == "RH") m_RHTrackerIndex = nDevice;
+			}
+		}
+		//}
+	}
+	UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] LHIndex: %d"), m_LHTrackerIndex);
+	UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] RHIndex: %d"), m_RHTrackerIndex);
+}
+
+FTransform UGloveComponent::ApplyTrackerOffset()
+{
+	FRotator tracker_rot;
+	FVector tracker_loc;
+
+	switch (type) {
+	case(VRTRIX::Hand_Left): {
+		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_LHTrackerIndex, tracker_loc, tracker_rot)) {
+			return FTransform::Identity;
+		}
+		break;
+	}
+	case(VRTRIX::Hand_Right): {
+		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_RHTrackerIndex, tracker_loc, tracker_rot)) {
+			return FTransform::Identity;
+		}
+		break;
+	}
+	}
+	FVector new_positon = tracker_loc + tracker_rot.Quaternion() * WristTrackerOffset;
+	return FTransform(tracker_rot, new_positon, FVector(1, 1, 1));
+}
+
+FTransform UGloveComponent::GetTrackerTransform() {
+	FRotator tracker_rot;
+	FVector tracker_loc;
+
+	switch (type) {
+	case(VRTRIX::Hand_Left): {
+		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_LHTrackerIndex, tracker_loc, tracker_rot)) {
+			return FTransform::Identity;
+		}
+		break;
+	}
+	case(VRTRIX::Hand_Right): {
+		if (!USteamVRFunctionLibrary::GetTrackedDevicePositionAndOrientation(m_RHTrackerIndex, tracker_loc, tracker_rot)) {
+			return FTransform::Identity;
+		}
+		break;
+	}
+	}
+	return FTransform(tracker_rot, tracker_loc, FVector(1, 1, 1));
+}
+
 static vr::ETrackedDeviceProperty VREnumToString(const FString& enumName, uint8 value)
 {
 	const UEnum* EnumPtr = FindObject<UEnum>(ANY_PACKAGE, *enumName, true);
@@ -663,10 +750,6 @@ static vr::ETrackedDeviceProperty VREnumToString(const FString& enumName, uint8 
 void UGloveComponent::GetVRDevicePropertyString(EVRDeviceProperty_String PropertyToRetrieve, int32 DeviceID, FString & StringValue, EBPOVRResultSwitch & Result)
 {
 
-#if !STEAMVR_SUPPORTED_PLATFORM
-	Result = EBPOVRResultSwitch::OnFailed;
-	return;
-#else
 	vr::TrackedPropertyError pError = vr::TrackedPropertyError::TrackedProp_Success;
 	vr::ETrackedDeviceProperty EnumPropertyValue = VREnumToString(TEXT("EVRDeviceProperty_String"), static_cast<uint8>(PropertyToRetrieve));
 	if (EnumPropertyValue == vr::ETrackedDeviceProperty::Prop_Invalid)
@@ -686,15 +769,10 @@ void UGloveComponent::GetVRDevicePropertyString(EVRDeviceProperty_String Propert
 	StringValue = FString(ANSI_TO_TCHAR(charvalue));
 	Result = EBPOVRResultSwitch::OnSucceeded;
 	return;
-#endif
 }
 
 void UGloveComponent::GetVRDevicePropertyBool(EVRDeviceProperty_Bool PropertyToRetrieve, int32 DeviceID, bool & BoolValue, EBPOVRResultSwitch & Result)
 {
-#if !STEAMVR_SUPPORTED_PLATFORM
-	Result = EBPOVRResultSwitch::OnFailed;
-	return;
-#else
 	vr::TrackedPropertyError pError = vr::TrackedPropertyError::TrackedProp_Success;
 	vr::ETrackedDeviceProperty EnumPropertyValue = VREnumToString(TEXT("EVRDeviceProperty_Bool"), static_cast<uint8>(PropertyToRetrieve));
 	if (EnumPropertyValue == vr::ETrackedDeviceProperty::Prop_Invalid)
@@ -712,15 +790,10 @@ void UGloveComponent::GetVRDevicePropertyBool(EVRDeviceProperty_Bool PropertyToR
 	Result = EBPOVRResultSwitch::OnSucceeded;
 	return;
 
-#endif
 }
 
 void UGloveComponent::GetVRDevicePropertyFloat(EVRDeviceProperty_Float PropertyToRetrieve, int32 DeviceID, float & FloatValue, EBPOVRResultSwitch & Result)
 {
-#if !STEAMVR_SUPPORTED_PLATFORM
-	Result = EBPOVRResultSwitch::OnFailed;
-	return;
-#else
 	vr::TrackedPropertyError pError = vr::TrackedPropertyError::TrackedProp_Success;
 	vr::ETrackedDeviceProperty EnumPropertyValue = VREnumToString(TEXT("EVRDeviceProperty_Float"), static_cast<uint8>(PropertyToRetrieve));
 	if (EnumPropertyValue == vr::ETrackedDeviceProperty::Prop_Invalid)
@@ -738,15 +811,10 @@ void UGloveComponent::GetVRDevicePropertyFloat(EVRDeviceProperty_Float PropertyT
 	Result = EBPOVRResultSwitch::OnSucceeded;
 	return;
 
-#endif
 }
 
 void UGloveComponent::GetVRDevicePropertyInt32(EVRDeviceProperty_Int32 PropertyToRetrieve, int32 DeviceID, int32 & IntValue, EBPOVRResultSwitch & Result)
 {
-#if !STEAMVR_SUPPORTED_PLATFORM
-	Result = EBPOVRResultSwitch::OnFailed;
-	return;
-#else
 	vr::TrackedPropertyError pError = vr::TrackedPropertyError::TrackedProp_Success;
 	vr::ETrackedDeviceProperty EnumPropertyValue = VREnumToString(TEXT("EVRDeviceProperty_Int32"), static_cast<uint8>(PropertyToRetrieve));
 	if (EnumPropertyValue == vr::ETrackedDeviceProperty::Prop_Invalid)
@@ -764,15 +832,10 @@ void UGloveComponent::GetVRDevicePropertyInt32(EVRDeviceProperty_Int32 PropertyT
 	Result = EBPOVRResultSwitch::OnSucceeded;
 	return;
 
-#endif
 }
 
 void UGloveComponent::GetVRDevicePropertyUInt64(EVRDeviceProperty_UInt64 PropertyToRetrieve, int32 DeviceID, FString & UInt64Value, EBPOVRResultSwitch & Result)
 {
-#if !STEAMVR_SUPPORTED_PLATFORM
-	Result = EBPOVRResultSwitch::OnFailed;
-	return;
-#else
 	vr::TrackedPropertyError pError = vr::TrackedPropertyError::TrackedProp_Success;
 	vr::ETrackedDeviceProperty EnumPropertyValue = VREnumToString(TEXT("EVRDeviceProperty_UInt64"), static_cast<uint8>(PropertyToRetrieve));
 	if (EnumPropertyValue == vr::ETrackedDeviceProperty::Prop_Invalid)
@@ -790,8 +853,81 @@ void UGloveComponent::GetVRDevicePropertyUInt64(EVRDeviceProperty_UInt64 Propert
 	Result = EBPOVRResultSwitch::OnSucceeded;
 	return;
 
-#endif
 }
+
+#else // !VRTRIX_UE_HAS_STEAMVR
+
+// UE 5.3+ has no SteamVR plugin. The Blueprint functions stay declared so that Blueprints made
+// on UE 5.0-5.2 still compile; they do nothing and say so once each.
+static void VRTRIXWarnSteamVROnly(bool& bWarned, const TCHAR* FunctionName)
+{
+	if (!bWarned) {
+		bWarned = true;
+		UE_LOG(LogTemp, Warning, TEXT("[VRTRIX] %s is only available on UE 5.0-5.2 (SteamVR)"), FunctionName);
+	}
+}
+
+bool UGloveComponent::GetTrackingSystem()
+{
+	return false;
+}
+
+void UGloveComponent::GetTrackerIndex()
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("GetTrackerIndex"));
+}
+
+FTransform UGloveComponent::ApplyTrackerOffset()
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("ApplyTrackerOffset"));
+	return FTransform::Identity;
+}
+
+FTransform UGloveComponent::GetTrackerTransform()
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("GetTrackerTransform"));
+	return FTransform::Identity;
+}
+
+void UGloveComponent::GetVRDevicePropertyString(EVRDeviceProperty_String PropertyToRetrieve, int32 DeviceID, FString & StringValue, EBPOVRResultSwitch & Result)
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("GetVRDevicePropertyString"));
+	Result = EBPOVRResultSwitch::OnFailed;
+}
+
+void UGloveComponent::GetVRDevicePropertyBool(EVRDeviceProperty_Bool PropertyToRetrieve, int32 DeviceID, bool & BoolValue, EBPOVRResultSwitch & Result)
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("GetVRDevicePropertyBool"));
+	Result = EBPOVRResultSwitch::OnFailed;
+}
+
+void UGloveComponent::GetVRDevicePropertyFloat(EVRDeviceProperty_Float PropertyToRetrieve, int32 DeviceID, float & FloatValue, EBPOVRResultSwitch & Result)
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("GetVRDevicePropertyFloat"));
+	Result = EBPOVRResultSwitch::OnFailed;
+}
+
+void UGloveComponent::GetVRDevicePropertyInt32(EVRDeviceProperty_Int32 PropertyToRetrieve, int32 DeviceID, int32 & IntValue, EBPOVRResultSwitch & Result)
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("GetVRDevicePropertyInt32"));
+	Result = EBPOVRResultSwitch::OnFailed;
+}
+
+void UGloveComponent::GetVRDevicePropertyUInt64(EVRDeviceProperty_UInt64 PropertyToRetrieve, int32 DeviceID, FString & UInt64Value, EBPOVRResultSwitch & Result)
+{
+	static bool bWarned = false;
+	VRTRIXWarnSteamVROnly(bWarned, TEXT("GetVRDevicePropertyUInt64"));
+	Result = EBPOVRResultSwitch::OnFailed;
+}
+
+#endif // VRTRIX_UE_HAS_STEAMVR
 
 bool FMyGesture::TriggerPositionCheck(TArray<float> Current_Position)
 {
