@@ -3,6 +3,7 @@
 
 #include "AnimNode_BlendGloveMoCap.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 FAnimNode_BlendGloveMoCap::FAnimNode_BlendGloveMoCap()
 {
@@ -14,6 +15,13 @@ void FAnimNode_BlendGloveMoCap::Initialize_AnyThread(const FAnimationInitializeC
 
 	Glove.Initialize(Context);
 	MoCap.Initialize(Context);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 2
+	if (!Context.AnimInstanceProxy || Context.AnimInstanceProxy->GetMainInstanceProxy() == nullptr)
+	{
+		//wait until we have a proper anim instance
+		return;
+	}
+#endif
 	UAnimInstance* anim = Context.AnimInstanceProxy->GetSkelMeshComponent()->GetAnimInstance();
 	if (anim == nullptr || anim->GetOwningActor() == nullptr) {
 		//UE_LOG(LogVRTRIXGlovePlugin, Display, TEXT("[GLOVES PULGIN] AnimInstance is NULL."));

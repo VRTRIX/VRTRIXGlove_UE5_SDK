@@ -26,11 +26,11 @@
       "LoadingPhase": "PostConfigInit"
     }
   ],
-
-   "Plugins": [
-     {
-       "Name": "SteamVR",
-       "Enabled": true
-     }
-   ]
+  "Plugins": [
+    {
+      "Name": "SteamVR",
+      "Enabled": true,
+      "Optional": true
+    }
+  ]
 }
