@@ -9,7 +9,9 @@ public class VRTRIXGlovePluginEditorTarget : TargetRules
 	{
 		Type = TargetType.Editor;
 
-        DefaultBuildSettings = BuildSettingsVersion.V5;
+        // UE 5.8 refuses an editor target whose settings differ from the installed engine's.
+        DefaultBuildSettings = BuildSettingsVersion.V7;
+        IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_8;
 
         ExtraModuleNames.AddRange( new string[] { "VRTRIXGlovePlugin" } );
 	}
