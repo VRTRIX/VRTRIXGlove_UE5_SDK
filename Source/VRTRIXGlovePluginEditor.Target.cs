@@ -9,7 +9,10 @@ public class VRTRIXGlovePluginEditorTarget : TargetRules
 	{
 		Type = TargetType.Editor;
 
-        DefaultBuildSettings = BuildSettingsVersion.V5;
+        // The installed engine's own settings (UE 5.7: V6, include order 5.7), as the editor target
+        // shares build products with UnrealEditor.
+        DefaultBuildSettings = BuildSettingsVersion.V6;
+        IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_7;
 
         ExtraModuleNames.AddRange( new string[] { "VRTRIXGlovePlugin" } );
 	}
